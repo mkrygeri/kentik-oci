@@ -1,7 +1,7 @@
 default:
   debug: 0
 oci_conf:
-  bootstrap.servers: "<OCI-ENDPOINT>"
+  bootstrap.servers: "<OCI-ENDPOINT>:9092"
   security.protocol: 'SASL_SSL'
   #ssl.ca.location: '/home/user/cacert.pem'
   sasl.mechanism: 'PLAIN'
