@@ -5,7 +5,7 @@ oci_conf:
   security.protocol: 'SASL_SSL'
   #ssl.ca.location: '/home/user/cacert.pem'
   sasl.mechanism: 'PLAIN'
-  sasl.username: '<OCI_TENANT>/<OCI_USERNAME>/OCI_STREAMPOOL_ID'
+  sasl.username: '<OCI_TENANT>/<OCI_USERNAME>/<OCI_STREAMPOOL_ID>'
   sasl.password: '<OCI-Token>' 
   group.id: '<UNIIQUE-GROUPNAME>'
   topic: '<OCI-Streamname>'
