@@ -6,6 +6,7 @@ import yaml
 import sys
 import logging, sys
 import certifi
+import os
 from schema import Schema, SchemaError
 from confluent_kafka import Consumer
 from base64 import b64decode
@@ -24,15 +25,29 @@ requests_log = logging.getLogger("requests.packages.urllib3")
 requests_log.setLevel(logging.ERROR)
 requests_log.propagate = True
 sampleRate = 1
+ktime = int(time.time())
 
-with open('/config/config.yaml', 'r') as file:
+
+with open('/opt/kentik/kentik-oci/config.yaml', 'r') as file:
     ocicfg = yaml.safe_load(file)
+
+http_client.HTTPConnection.debuglevel = ocicfg['default']['debug']
+
+if os.environ.get("ocitoken"):
+    ocitoken = os.environ['ocitoken']
+else: 
+    ocitoken = ocicfg['oci_conf']['sasl.password']
+
+if os.environ.get("kentiktoken"):
+    kentiktoken = os.environ['kentiktoken']
+else:
+    kentiktoken = ocicfg['kentik_auth']['X-CH-Auth-API-Token']
 
 
 #kentik API stuff
 headers = {
     'X-CH-Auth-Email': ocicfg['kentik_auth']['X-CH-Auth-Email'],
-    'X-CH-Auth-API-Token': ocicfg['kentik_auth']['X-CH-Auth-API-Token'],
+    'X-CH-Auth-API-Token': kentiktoken,
 }
 
 
@@ -51,8 +66,10 @@ conf = {
         # 3. 'ssl.ca.location': certifi.where()
         'sasl.mechanism': ocicfg['oci_conf']['sasl.mechanism'],
         'sasl.username': ocicfg['oci_conf']['sasl.username'],
-        'sasl.password': ocicfg['oci_conf']['sasl.password'],  # from step 7 of Prerequisites section
+        'sasl.password': ocitoken,  # from step 7 of Prerequisites section
         'group.id': ocicfg['oci_conf']['group.id'],
+        'debug': ocicfg['oci_conf']['debug'],
+        'broker.version.fallback': '0.10.2.1'
  }
 
 
@@ -61,7 +78,7 @@ def process(log):
     vniccompartmentocid = ''
     vnicocid = ''
     log = log.replace("Null:","")
-    #sys.stdout.write(log)
+    #print(log)
     parsed = json.loads(log)
     metric = Metric('oci_flow_log')
     metric.add_tag('sampleRate',sampleRate)
@@ -110,7 +127,11 @@ def sendit():
     file1 = open("oci.txt", "r")
     headers['Content-Type'] = 'application/influx'
     payload= file1.read()
-    response = requests.post(url, headers=headers, data=payload)
+    response = None
+    try:
+        response = requests.post(url, headers=headers, data=payload)
+    except requests.exceptions.RequestException as e:
+        print(e)
     return response
 
 def device_check():
@@ -118,27 +139,27 @@ def device_check():
     try:
         response = requests.get(api_url + '/api/v5/device/' + ocicfg['kentik_device']['device_id'], headers=headers, data='' )
     except:
-        sys.stdout.write("failed to request verification data exiting")
+        print("failed to request verification data exiting")
         exit(0)
     resp = json.loads(response.text)
     if resp['device']['device_sample_rate']:
         global sampleRate
-        #sampleRate = resp['device']['device_sample_rate']
         sampleRate = int(resp['device']['device_sample_rate'])
+        print("sampleRate: " + str(sampleRate))
     if resp['device']['id'] ==  ocicfg['kentik_device']['device_id']:
-        sys.stdout.write("Valid Device ID")
+        print("Valid Device ID")
     else:
-        sys.stdout.write("the id in the config does not match")
+        print("the id in the config does not match")
         exit(0)
     if resp['device']['device_name'] ==  ocicfg['kentik_device']['device_name']:
-        sys.stdout.write("Valid Device name: " + resp['device']['device_name'])
+        print("Valid Device name: " + resp['device']['device_name'])
     else:
-        sys.stdout.write("the device_name " + resp['device']['device_name']  + " in the config does not match" + ocicfg['kentik_device']['device_name'])
+        print("the device_name " + resp['device']['device_name']  + " in the config does not match" + ocicfg['kentik_device']['device_name'])
         exit(0)
     if resp['device']['company_id'] ==  ocicfg['kentik_device']['company_id']:
-        sys.stdout.write("Valid company_id")    
+        print("Valid company_id")    
     else:
-        sys.stdout.write("the company_id in the config does not match")
+        print("the company_id in the config does not match")
         exit(0)
 
 
@@ -147,7 +168,6 @@ if __name__ == '__main__':
     samplecount = 1
     timer = 0
     file1 = open("oci.txt", "w")
-  
     device_check()
 
     # Create Kafka Consumer instance
@@ -161,41 +181,49 @@ if __name__ == '__main__':
         while True:
             
             msg = consumer.poll(10.0)
-            timer =+ 10
             if msg is None:
-                #sys.stdout.write("Waiting for message or event/error in poll()")
+                #print("Waiting for message or event/error in poll()")
                 continue
         
             elif msg.error():
-                sys.stdout.write('error: {}'.format(msg.error()))
+                print('error: {}'.format(msg.error()))
             else:
                 # Check for Kafka message
                 record_key = "Null" if msg.key() is None else msg.key().decode('utf-8')
                 record_value = msg.value().decode('utf-8')
-                count += 1
                 samplecount += 1
-                if samplecount%sampleRate:
-                    continue 
-                if not samplecount%sampleRate:
-                    print("no skip")
-                inflx = process(record_value)
-                 
+                #This checks the modulo of the total number of flows against the sample rate. This creates a deterministic sampler.
+                
+                if bool(samplecount%sampleRate):
+                    continue
+                else:
+        #sampleRate = resp['device']['device_sample_rate']
+                    try: 
+                        inflx = process(record_value)
+                    except:
+                        print("bad record")
+                        print(record_value)
+                        continue
+
+                count += 1
 
                 if file1.closed:
                     file1 = open("oci.txt", "w+")
                 file1.write(inflx + "\n")
-                if (count == 2) | (timer >= 10 ):
+                if (count >= sampleRate*10) or (int(time.time()) - ktime >= 30):
                     file1.close()
                     response = sendit()
-                    if response.text == "GOOD":
-                        print("successful")
-                        count = 0
-                        timer = 0
-
-                    else:
-                        sys.stdout.write("something broke!" + str(response))
+                    try:
+                        if response.text == "GOOD":
+                            logging.info("processed and sent %d flowlogs", count )
+                            count = 0
+                            ktime = time.time()
+                        else:
+                            print("something broke!" + str(response))
+                    except: 
+                        print("There is an error in the response")
     except KeyboardInterrupt:
             pass
     finally:
-            sys.stdout.write("Leave group and commit final offsets")
+            print("Leave group and commit final offsets")
     consumer.close()
