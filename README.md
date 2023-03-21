@@ -11,6 +11,8 @@ This is POC python code that will subscribe to an OCI flowlog stream and send it
 ##installing as a systemd service
 1. Create config.yaml as seen above
 2. Edit the kentik.env file and put in your tokens
+4. Install python(if not installed)
+5. run "pip install -r requirements.txt" in order to install any required python libraries.
 3. chmod +x service.sh
 4. Run ./service.sh 
 5. Check service by running "systemctl status kentik-oci.service"
