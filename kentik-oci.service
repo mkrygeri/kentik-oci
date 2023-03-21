@@ -1,0 +1,16 @@
+[Unit]
+Description=Kentik OCI Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/kentik/kentik-oci/
+EnvironmentFile=-/etc/kentik.env
+ExecStart=/bin/python3 /opt/kentik/kentik-oci/kentik_oci_flow.py
+Restart=on-failure
+RestartSec=3
+## Restart on failure but wait 3 sec.
+
+[Install]
+WantedBy=multi-user.target
