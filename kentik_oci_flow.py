@@ -2,6 +2,7 @@ import time
 import json
 import re
 import requests
+import asyncio
 import yaml
 import sys
 import logging, sys
@@ -68,7 +69,7 @@ conf = {
         'sasl.username': ocicfg['oci_conf']['sasl.username'],
         'sasl.password': ocitoken,  # from step 7 of Prerequisites section
         'group.id': ocicfg['oci_conf']['group.id'],
-        'debug': ocicfg['oci_conf']['debug'],
+        #'debug': ocicfg['oci_conf']['debug'],
         'broker.version.fallback': '0.10.2.1'
  }
 
@@ -78,10 +79,9 @@ def process(log):
     vniccompartmentocid = ''
     vnicocid = ''
     log = log.replace("Null:","")
-    #print(log)
     parsed = json.loads(log)
     metric = Metric('oci_flow_log')
-    metric.add_tag('sampleRate',sampleRate)
+    metric.add_value('sampleRate',sampleRate)
    #Data Fields
     metric.add_tag('action',parsed['data']['action'])
     metric.add_tag('destinationAddress',parsed['data']['destinationAddress'])
@@ -89,7 +89,7 @@ def process(log):
     metric.add_tag('protocolName',parsed['data']['protocolName'])
     metric.add_tag('sourceAddress',parsed['data']['sourceAddress'])
     metric.add_tag('status',parsed['data']['status'])
-    metric.add_tag('version',str(parsed['data']['version']))
+    metric.add_tag('version',parsed['data']['version'])
     metric.add_tag('id',parsed['id'])
     #oracle fields
     metric.add_tag('compartmentid',parsed['oracle']['compartmentid'])
@@ -106,33 +106,30 @@ def process(log):
     metric.add_tag('time',parsed['time'])
     metric.add_tag('type',parsed['type'])
     #metric data
-    metric.add_value('bytesOut', str(parsed['data']['bytesOut']))
-    metric.add_value('destinationPort',str(parsed['data']['destinationPort']))
-    metric.add_value('endTime',str(parsed['data']['endTime']))
-    metric.add_value('packets', str(parsed['data']['packets']))
-    metric.add_value('protocol',str(parsed['data']['protocol']))
-    metric.add_value('sourcePort',str(parsed['data']['sourcePort']))
-    metric.add_value('startTime',str(parsed['data']['startTime']))
-    #metric.with_timestamp(time.time_ns())
+    metric.add_value('bytesOut', parsed['data']['bytesOut'])
+    metric.add_value('destinationPort',parsed['data']['destinationPort'])
+    metric.add_value('endTime',parsed['data']['endTime'])
+    metric.add_value('packets', parsed['data']['packets'])
+    metric.add_value('protocol',parsed['data']['protocol'])
+    metric.add_value('sourcePort',parsed['data']['sourcePort'])
+    metric.add_value('startTime',parsed['data']['startTime'])
     #kentik doesn't need this, set to 0 
     metric.with_timestamp(0)
-    #Change to a string & remove quotes
+    #Change to a string
     metric = str(metric)
-    metric = re.sub('"', '', metric)
     return metric
-    
 
 #reads/writes a file. this might help with persisting data, but it's probably best to not write to disk. Performance might dictate something different 
-def sendit():
-    file1 = open("oci.txt", "r")
+async def sendit(flows,ktime,sampleRate,samplecount,totalds,totalSent):
+    influx = '\n'.join(flows)
     headers['Content-Type'] = 'application/influx'
-    payload= file1.read()
     response = None
     try:
-        response = requests.post(url, headers=headers, data=payload)
+        response = requests.post(url, headers=headers, data=influx)
     except requests.exceptions.RequestException as e:
         print(e)
-    return response
+    print("%d Overall sample rate is %d, expecting %d. Sample size is %d. Total flows downsampled is %d.  TotalSent is %d, this batch is %d flows"%(ktime,(samplecount/totalSent),sampleRate,samplecount,totalds,totalSent,len(flows)))
+    print(response.status_code)
 
 def device_check():
     headers['Content-Type'] = 'application/json'
@@ -145,7 +142,6 @@ def device_check():
     if resp['device']['device_sample_rate']:
         global sampleRate
         sampleRate = int(resp['device']['device_sample_rate'])
-        print("sampleRate: " + str(sampleRate))
     if resp['device']['id'] ==  ocicfg['kentik_device']['device_id']:
         print("Valid Device ID")
     else:
@@ -165,9 +161,12 @@ def device_check():
 
 if __name__ == '__main__':
     count = 0
-    samplecount = 1
+    totalds = 0
+    totalSent = 0
+    total =0
+    samplecount = 0
     timer = 0
-    file1 = open("oci.txt", "w")
+    flows = []
     device_check()
 
     # Create Kafka Consumer instance
@@ -180,9 +179,9 @@ if __name__ == '__main__':
     try:
         while True:
             
-            msg = consumer.poll(10.0)
+            msg = consumer.poll(1.0)
             if msg is None:
-                #print("Waiting for message or event/error in poll()")
+                #print("no msg")
                 continue
         
             elif msg.error():
@@ -192,36 +191,32 @@ if __name__ == '__main__':
                 record_key = "Null" if msg.key() is None else msg.key().decode('utf-8')
                 record_value = msg.value().decode('utf-8')
                 samplecount += 1
-                #This checks the modulo of the total number of flows against the sample rate. This creates a deterministic sampler.
-                
                 if bool(samplecount%sampleRate):
+                    totalds += 1
                     continue
                 else:
-        #sampleRate = resp['device']['device_sample_rate']
                     try: 
-                        inflx = process(record_value)
+                        record = process(record_value)
+                        #print("processed %d sample" % samplecount)
+                        count +=1
                     except:
                         print("bad record")
-                        print(record_value)
+                        #print(record_value)
                         continue
 
-                count += 1
-
-                if file1.closed:
-                    file1 = open("oci.txt", "w+")
-                file1.write(inflx + "\n")
-                if (count >= sampleRate*10) or (int(time.time()) - ktime >= 30):
-                    file1.close()
-                    response = sendit()
+                flows.append(record)
+                #print("%d flows in buffer" % len(flows))
+                if (len(flows) >= 100): #or (int(time.time()) - ktime >= 30):
+                    consumer.commit(asynchronous=True)
                     try:
-                        if response.text == "GOOD":
-                            logging.info("processed and sent %d flowlogs", count )
-                            count = 0
-                            ktime = time.time()
-                        else:
-                            print("something broke!" + str(response))
-                    except: 
-                        print("There is an error in the response")
+                        totalSent += len(flows)
+                        asyncio.run(sendit(flows,ktime,sampleRate,samplecount,totalds,totalSent))
+                        count = 0
+                        ktime = time.time()
+                        flows=[]
+                        influx =[]
+                    except Exception as e: 
+                        print(e)
     except KeyboardInterrupt:
             pass
     finally:
