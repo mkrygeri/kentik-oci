@@ -8,8 +8,9 @@ import sys
 import logging, sys
 import certifi
 import os
+import uuid
 from schema import Schema, SchemaError
-from confluent_kafka import Consumer
+from confluent_kafka import Consumer,TopicPartition
 from base64 import b64decode
 from influx_line_protocol import Metric, MetricCollection
 from datetime import datetime
@@ -58,7 +59,9 @@ api_url =  ocicfg['kentik_auth']['api_url']
 
 #OCI API stuff for Kafka
 topic = ocicfg['oci_conf']['topic']  
-conf = {  
+conf = { 
+        'auto.offset.reset': 'latest',
+        'enable.auto.commit': False,
         'bootstrap.servers': ocicfg['oci_conf']['bootstrap.servers'],
         'security.protocol': ocicfg['oci_conf']['security.protocol'],  
         'ssl.ca.location': certifi.where(),
@@ -68,7 +71,7 @@ conf = {
         'sasl.mechanism': ocicfg['oci_conf']['sasl.mechanism'],
         'sasl.username': ocicfg['oci_conf']['sasl.username'],
         'sasl.password': ocitoken,  # from step 7 of Prerequisites section
-        'group.id': ocicfg['oci_conf']['group.id'],
+        'group.id': uuid.uuid4(),
         #'debug': ocicfg['oci_conf']['debug'],
         'broker.version.fallback': '0.10.2.1'
  }
@@ -174,14 +177,14 @@ if __name__ == '__main__':
 
     # Subscribe to Kafka topic
     consumer.subscribe([topic])
-
+    info = TopicPartition(topic)
+    print(info)
     # Process messages
     try:
         while True:
             
             msg = consumer.poll(1.0)
             if msg is None:
-                #print("no msg")
                 continue
         
             elif msg.error():
@@ -208,6 +211,10 @@ if __name__ == '__main__':
                 #print("%d flows in buffer" % len(flows))
                 if (len(flows) >= 100): #or (int(time.time()) - ktime >= 30):
                     consumer.commit(asynchronous=True)
+                    info = TopicPartition(topic)
+                    topic_partition = TopicPartition(topic, partition=1)
+                    low, high = consumer.get_watermark_offsets(topic_partition)
+                    print("the latest offset is {}".format(high))
                     try:
                         totalSent += len(flows)
                         asyncio.run(sendit(flows,ktime,sampleRate,samplecount,totalds,totalSent))
